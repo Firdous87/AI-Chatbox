@@ -1,47 +1,29 @@
 import streamlit as st
 from PyPDF2 import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-import os
-
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-import google.generativeai as genai
+from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores import Chroma
+from langchain.docstore.document import Document
+from dotenv import load_dotenv
 from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
-from dotenv import load_dotenv
+from langchain_groq import ChatGroq
+import os
+import shutil
 
+# Load environment variables
 load_dotenv()
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-def get_pdf_text(pdf_docs):
-    text = ""
-    for pdf in pdf_docs:
-        pdf_reader = PdfReader(pdf)
-        for page in pdf_reader.pages:
-            text += page.extract_text()
-    return text
+# HuggingFace embedding model
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-def get_text_chunks(text):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=1000)
-    return splitter.split_text(text)
-
-def get_vector_store(text_chunks):
-    # 1) create embeddings
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    # 2) build Chroma store (will create ./chroma_db/)
-    vector_store = Chroma.from_texts(
-        texts=text_chunks,
-        embedding=embeddings,
-        persist_directory="chroma_db"
-    )
-    # 3) save to disk
-    vector_store.persist()
-
+# Set up Groq model (Mixtral)
 def get_conversational_chain():
     prompt_template = """
-Answer the question as detailed as possible from the provided context.  
+Answer the question as detailed as possible from the provided context.
 If the answer is not in the context, just say "answer is not available in the context".
-  
+
 Context:
 {context}
 
@@ -50,68 +32,63 @@ Question:
 
 Answer:
 """
-    model = ChatGoogleGenerativeAI(model="models/gemini-1.5-pro-latest", temperature=0.3)
-    prompt = PromptTemplate(template=prompt_template, input_variables=["context","question"])
-    return load_qa_chain(model, chain_type="stuff", prompt=prompt)
+    llm = ChatGroq(model_name="llama3-70b-8192", groq_api_key=GROQ_API_KEY)
+    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
+    return load_qa_chain(llm, chain_type="stuff", prompt=prompt)
 
-import time, random
-from google.api_core.exceptions import ResourceExhausted
+# Extract text from PDFs
+def get_pdf_text(pdf_docs):
+    text = ""
+    for pdf in pdf_docs:
+        reader = PdfReader(pdf)
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted
+    return text
 
-def run_with_retries(chain, inputs, max_retries=5):
-    """
-    Try `chain(...)` up to max_retries times, backing off on ResourceExhausted.
-    Returns the chain output dict, or re-raises after max_retries.
-    """
-    for attempt in range(1, max_retries + 1):
-        try:
-            return chain(inputs, return_only_outputs=True)
-        except ResourceExhausted as err:
-            # If the error includes a retry_delay, use it; otherwise exponential/backoff
-            delay = getattr(err, 'retry_delay', None)
-            wait = delay.seconds if delay and hasattr(delay, 'seconds') else (2 ** attempt)
-            jitter = random.uniform(0, 1)
-            total_wait = wait + jitter
-            st.warning(
-                f"Hit rate limit (attempt {attempt}/{max_retries}). "
-                f"Retrying in {total_wait:.1f}s…"
-            )
-            time.sleep(total_wait)
-    # all retries failed
-    raise
+# Split text
+def get_text_chunks(text):
+    splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=1000)
+    return splitter.split_text(text)
 
-def user_input(user_question):
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    # load the persisted Chroma store
-    db = Chroma(
-        persist_directory="chroma_db",
-        embedding_function=embeddings
+# Create vector store
+def get_vector_store(text_chunks):
+    if os.path.exists("chroma_db"):
+        shutil.rmtree("chroma_db")
+    vector_store = Chroma.from_texts(
+        texts=text_chunks,
+        embedding=embeddings,
+        persist_directory="chroma_db"
     )
+    vector_store.persist()
+
+# Handle user query
+def user_input(user_question):
+    db = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
     docs = db.similarity_search(user_question)
     chain = get_conversational_chain()
-    output = run_with_retries(chain, {"input_documents": docs, "question": user_question})
-    st.write("Reply:", output["output_text"])
+    response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
+    st.write("Reply:", response["output_text"])
 
+# Streamlit UI
 def main():
-    st.set_page_config(page_title="Chat with Multiple PDF")
-    st.header("Chat with multiple PDF using Gemini 💁")
+    st.set_page_config(page_title="Chat with Multiple PDFs (Groq)")
+    st.header("Chat with multiple PDFs using Mixtral 💬")
 
-    user_question = st.text_input("Ask a Question from the PDF Files")
+    user_question = st.text_input("Ask a question from the uploaded PDFs:")
     if user_question:
         user_input(user_question)
 
     with st.sidebar:
-        st.title("Menu:")
-        pdf_docs = st.file_uploader(
-            "Upload your PDF Files and Click Submit & Process",
-            accept_multiple_files=True
-        )
+        st.title("Upload & Process PDFs:")
+        pdf_docs = st.file_uploader("Upload PDF files", accept_multiple_files=True)
         if st.button("Submit & Process"):
             with st.spinner("Processing..."):
                 raw_text = get_pdf_text(pdf_docs)
                 chunks = get_text_chunks(raw_text)
                 get_vector_store(chunks)
-                st.success("Indexing complete!")
+                st.success("PDFs indexed and ready!")
 
 if __name__ == "__main__":
     main()
-
