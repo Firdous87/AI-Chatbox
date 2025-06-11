@@ -11,12 +11,13 @@ from langchain_groq import ChatGroq
 import os
 import shutil
 
+
 # Load environment variables
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # HuggingFace embedding model
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
 
 # Set up Groq model (Mixtral)
 def get_conversational_chain():
@@ -49,13 +50,12 @@ def get_pdf_text(pdf_docs):
 
 # Split text
 def get_text_chunks(text):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=1000)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=1000)
     return splitter.split_text(text)
 
 # Create vector store
 def get_vector_store(text_chunks):
-    if os.path.exists("chroma_db"):
-        shutil.rmtree("chroma_db")
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     vector_store = Chroma.from_texts(
         texts=text_chunks,
         embedding=embeddings,
@@ -65,6 +65,8 @@ def get_vector_store(text_chunks):
 
 # Handle user query
 def user_input(user_question):
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
     db = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
     docs = db.similarity_search(user_question)
     chain = get_conversational_chain()
